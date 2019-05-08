@@ -1,0 +1,445 @@
+* Introduction
+
+Roland Schüle's data has batch effects, and due to computational constraints (especially during clustering), so processing was performed on Galaxy using a wide range of filtering *and* clustering parameters. 
+
+** Issues/ Tasks
+1. Hundreds of histories generated
+   10 output sets generated for each input matrix, and then 10 different output sets for each filtered matrix, giving about 100 sets to consider.
+
+2. Need to pool all data into one place
+
+* Install Dependencies
+
+  #+begin_src bash
+    sudo pip install jedi flake8 autopep8 yapf black
+  #+end_src
+
+* Generating the script
+
+  #+begin_src python
+    #!/usr/bin/env python3
+
+    from bioblend import galaxy
+    import pickle
+
+    gi = galaxy.GalaxyInstance(url="https://usegalaxy.eu", key='b2691fc87c1e1492f0400fb0b31a9fee')
+    hc = galaxy.histories.HistoryClient(gi)
+    hl = gi.histories.get_histories()
+
+    histories = filter(lambda x: x['name'].startswith("Roland SIN6 Cluster Inspect (Super) on"), hl)
+
+    accum = {}
+
+    for hist in histories:
+        tmp = hc.show_history(hist['id'])
+        h_id = tmp['id']
+        sets = tmp['state_ids']['ok']
+        print(h_id)
+        if len(sets) > 0:
+            # too long
+            #dsets = hc.show_matching_datasets(hist['id'], name_filter="Cluster\sInspection.*PDF.*")
+            if h_id not in accum:
+                accum[h_id] = []
+
+            accum[h_id] = accum[h_id] + sets
+
+    with open('datasets.pickle', 'wb') as pick:
+        pickle.dump(accum, pick)
+  #+end_src
+
+  #+RESULTS:
+  : None
+
+Unforuntately there is no API call in bioblend to copy a dataset to another history, so we need to do this manually.
+
+* Posting to history
+
+  #+begin_src python :results output file :file datasets.txt
+    import pickle
+    data = None
+    with open('datasets.pickle', 'rb') as pick:
+        data = pickle.load(pick)
+
+    #print("History\tDatasets")e
+
+    for hid in data:
+        #print(hid, data[hid]
+        for d in data[hid]:
+            print(d)
+  #+end_src
+
+  #+RESULTS:
+  [[file:datasets.txt]]
+
+
+  #+begin_src bash :results output
+    hist="8332b2fe3e69f6a1"
+
+    function postit {
+        dat="$1"
+        [ "$dat" = "" ] && echo "None" && return -1
+
+        curl "https://usegalaxy.eu/api/histories/$hist/contents" -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:66.0) Gecko/20100101 Firefox/66.0' -H 'Accept: */*' -H 'Accept-Language: en-GB,en;q=0.5' --compressed -H 'Referer: https://usegalaxy.eu/history/view_multiple' -H 'Content-Type: application/json' -H 'X-Requested-With: XMLHttpRequest' -H 'DNT: 1' -H 'Connection: keep-alive' -H 'Cookie: galaxysession=11ac94870d0bb33a7317347168e97f79598c60634b7fd41e2fc54b83f149fa7fee57781ed001094f' -H 'Pragma: no-cache' -H 'Cache-Control: no-cache' --data "{\"content\":\"$dat\",\"source\":\"hda\",\"type\":\"dataset\"}" 
+  
+    }
+
+    while read line; do
+        echo $line | tee -a log.txt
+        postit $line | tee -a log.txt
+    done<datasets.txt
+
+    #postit 
+  #+end_src
+
+  #+RESULTS:
+  #+begin_example
+  #+end_example
+
+
+ba = hc.show_dataset('4b8de826969be080', '54aaeeffc4019050')
+
+
+* A table of parameters
+
+For each dataset we want to know the parameters and the input sets that generated it.
+We can do this one of two ways:
+
+ 1. Download each assosciated RDS and probe the settings
+ 2. Trace the job input requirements in galaxy.
+
+1 is easiest, but we need to use the Job API to find the input RDS for it.
+
+  #+begin_src python :results output file :file rds.list
+    #!/usr/bin/env python3
+
+    from bioblend import galaxy
+    import pickle
+    import json
+
+    gi = galaxy.GalaxyInstance(url="https://usegalaxy.eu", key='b2691fc87c1e1492f0400fb0b31a9fee')
+    hc = galaxy.histories.HistoryClient(gi)
+    ji = galaxy.jobs.JobsClient(gi)
+    hl = gi.histories.get_histories()
+
+    histories = filter(lambda x: x['name'].startswith("Roland Gather Outputs"), hl)
+    history = None
+    for hist in histories:
+        history = hc.show_history(hist['id'])
+        break
+
+    dsets = hc.show_matching_datasets(history['id'], name_filter="Cluster\sInspection.*PDF.*")
+    formatter="%20s    %15s    %15s"
+    print(formatter % ("Cluster Inspect PDF", "Job ID", "Cluster RDS ID"))
+    print("All jobs are printing all clusters, no other parameters")
+    for d in dsets:
+        d_id = d['id']
+        j_id = d['creating_job']
+        job_details = ji.show_job(j_id)
+        input_rds = job_details['inputs']['inputrds']['id']
+
+        #print(json.dumps(job_details, indent=4, sort_keys=True))
+        #break
+        print(formatter % (d_id, j_id, input_rds))
+        #break
+
+  #+end_src
+
+  #+RESULTS:
+  [[file:rds.list]]
+
+
+* Download the RDS datasets
+
+Now we need to download the RDS's for each of these
+
+#+begin_src bash
+mkdir rds_sets
+#+end_src
+
+#+RESULTS:
+
+** Quick threading check
+
+   #+begin_src python :results output
+     import threading
+     import logging
+
+     def fun(arg):
+         print("Exec %d" % arg)
+
+     threads = list()
+
+     for num in range(10):
+         x = threading.Thread(target=fun, args=(num,))
+         threads.append(x)
+         x.start()
+
+     for index,thread in enumerate(threads):
+         thread.join()
+   #+end_src
+
+   #+RESULTS:
+   #+begin_example
+   Exec 0
+   Exec 1
+   Exec 2
+   Exec 3
+   Exec 4
+   Exec 5
+   Exec 6
+   Exec 7
+   Exec 8
+   Exec 9
+   #+end_example
+
+** Get the data
+
+Using the multiprocessing instead of threading, much easier.
+
+   #+begin_src python :results output :async
+     from bioblend import galaxy
+     from multiprocessing.dummy import Pool as ThreadPool
+
+     gi = galaxy.GalaxyInstance(url="https://usegalaxy.eu", key='b2691fc87c1e1492f0400fb0b31a9fee')
+     dc = galaxy.datasets.DatasetClient(gi)
+
+     def downloadline(rid):
+         print(rid)
+         dc.download_dataset(rid, file_path="/extra/repos/org/notebooks/rds_sets/%s.rds" % rid, use_default_filename=False)
+
+     ids = []
+
+     with open('rds.list') as f:
+         line = f.readline()
+         line = f.readline()
+
+         for line in f:
+             did, jid, rid = line.splitlines()[0].split()
+             ids.append(rid)
+
+     pool = ThreadPool(3)
+     results = pool.map(downloadline, ids)
+    #+end_src
+
+    #+RESULTS:
+    #+begin_example
+    b1c7e9cbc724f2a6
+    12a5c291133c6feb
+    ef0974d0e6ee4e6d
+    8d84891e03fa276c
+    233b841de6101cfa
+    0c2b055214605c76
+    7ad81f8e836d4431
+    09e5014b393e4f26
+    ef9d319fbfbd00e1
+    be4434fdb933face
+    1c24e5f6c99478ac
+    9299e08c5ced7e27
+    0ac939dc6c809c17
+    568884ff485b0441
+    322249ef396d8817
+    e06716d7e0d4d2d0
+    10182a8f85fe431c
+    345a5dc6bfd113a9
+    3b483c85372cff8a
+    0b3f09080a29523f
+    f8dd50af46da4bbf
+    a3c3c40d394198c6
+    a98a21434199a1bc
+    0b44bc352ffe85ec
+    40c47c972d5a6e02
+    8a8f6656340cb9ed
+    a3dacde40e151b28
+    bd5cc41ab668db34
+    2096bf44ad20d777
+    4f259d75b5c17ece
+    777506efcf9a82c7
+    40f364e19467e912
+    71370fa484f769d2
+    de640930e109cdfd
+    6e96f561aa01bd5d
+    1c813d50dfb328a4
+    86d8890b4707f777
+    61e049f9be0e8281
+    4bf2de6f8f3338fb
+    a4051fd8b45daa7c
+    b84cc3afefeabbdd
+    0c20a513e5cff9bb
+    0e7563a0e902b8bd
+    4bb3548f9c565433
+    37c68ca619570cab
+    123712c8b4c59693
+    842d262f1dcac604
+    f73c30c3bbc69b9c
+    8ed8c2786be959ae
+    d774a19cd1aa8d27
+    108cdc06e938c9e0
+    9b7ba4e58172151f
+    62ef554e8bd3a7f2
+    88ee4d1560368408
+    2e45eb899dbc6888
+    15c9143163fcc57f
+    e7e743fd82fa8e12
+    05280ffbaf62acc3
+    a5173fa4d46da0ff
+    6daf47c716101789
+    f7921835b498cc84
+    f2665a35ba1ecdce
+    3ed63c9056589744
+    4ef1433204c196eb
+    22878a811495bc51
+    0fa042ef1652fb0e
+    6a861ca1def44d5c
+    d3011d9985f96bc0
+    2c72096a3cf0cb53
+    dbb7ae90acf8cde7
+    eaeb72249064ab19
+    dfc6fbdba2e0649d
+    #+end_example
+    
+* Grab Params from each RDS
+
+Essentially, for each RDS file we want to decipher:
+
+   1) Filtering params
+   2) Clustering Params
+   3) Plot of final PDF
+   4) Assessment of whether batch effect remains
+
+** For each RDS
+
+Want to to have the most number of clusters with the highest median jaccard
+score: nclusts * median(jaccard)
+
+
+   #+begin_src R :results output
+     library(RaceID)
+
+     rds.arr <- Sys.glob('rds_sets/*.rds')
+
+     populateLine <- function(dataset){
+
+         test <- readRDS(dataset)
+
+         all.vec <- c(
+             name=dataset,
+             unlist(test@filterpar),
+             unlist(test@clusterpar),
+             genes=length(test@genes),
+             cells=length(names(test@counts)),
+             jaccard=paste(test@cluster$jaccard, collapse=",")
+         )
+
+         png(paste(dataset,".png", sep=""))
+         plotmap(test,fr=F,final=T)
+         dev.off()
+
+         return(all.vec)
+     }
+
+
+     all.dat <- NULL
+
+     if (is.null(all.dat)){
+         dummy <- populateLine(rds.arr[1])
+         all.dat <- data.frame(names=names(dummy))
+     }
+
+     for (rds in rds.arr){
+         message(paste("Reading", rds))
+         dats <- populateLine(rds)
+         all.dat <- cbind(all.dat, dats)
+     }
+
+     saveRDS(all.dat, "rds_sets/stats2.all")
+   #+end_src
+
+   #+RESULTS:
+
+** Convert into legible table
+
+#+BEGIN_SRC R :results output
+  library(tidyverse)
+
+  options(width=150)
+
+  ## Format data into a nicer type
+  tab <- t(readRDS('rds_sets/stats2.all'))
+  colnames(tab) <- names(tab[1,])
+  dnames <- as.vector(tab[,1])
+  rownames(tab) <- dnames
+  tab <- as.data.frame(tab, stringsAsFactors = F)
+  tab <- tab %>% filter(mintotal!="mintotal")
+  tab <- as_tibble(tab)
+  dim(tab)
+
+  ## Convert to correct types (currently all chr)
+  tab <- tab %>%
+      mutate_at(
+          vars(mintotal,minexpr,minnumber,clustnr,bootnr,rseed,genes,cells),
+          funs(as.integer)) %>%
+      mutate_at(
+          vars(sat,FSelect),
+          funs(as.logical))
+
+  ## Generate scores based on Jaccard
+  ## first split out values into doubles (have to do it this way, because nested values...)
+  tab$jaccard <- lapply(tab$jaccard, function(x){ as.numeric(unlist(strsplit(x,split=",")))})
+  tab$jacbelow6 <- unlist(lapply(tab$jaccard, function(x){ sum(x <= 0.6) }))
+  tab$jacabove8 <- unlist(lapply(tab$jaccard, function(x){ sum(x >= 0.8) }))
+  tab$jacmed <- unlist(lapply(tab$jaccard, function(x){ median(x) }))
+  tab$nc <- unlist(lapply(tab$jaccard, function(x){ length(x) }))
+
+  ## Prune (but store) unchanging values
+  constant = list(
+      clustnr=unique(tab$clustnr), bootnr=unique(tab$bootnr), rseed=unique(tab$rseed),
+      sat=unique(tab$sat), FSelect =unique(tab$FSelect)
+  )
+
+  tab <- tab %>% select(name, mintotal, minexpr, minnumber, bmode, metric, FUNcluster, genes, cells, jacmed, jacbelow6, jacabove8, nc)
+
+  options(crayon.enabled = FALSE)
+  tab %>% arrange(desc(jacmed))
+
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+[1] 72 15
+# A tibble: 72 x 13
+   name                          mintotal minexpr minnumber bmode  metric     FUNcluster genes cells jacmed jacbelow6 jacabove8    nc
+   <chr>                            <int>   <int>     <int> <chr>  <chr>      <chr>      <int> <int>  <dbl>     <int>     <int> <int>
+ 1 rds_sets/10182a8f85fe431c.rds     3000       5         5 RaceID euclidean  kmedoids    4540  4515  0.840         0         5     7
+ 2 rds_sets/1c24e5f6c99478ac.rds     3000       5         5 RaceID euclidean  kmedoids    4540  4515  0.840         0         5     7
+ 3 rds_sets/568884ff485b0441.rds     3000       5         5 scran  euclidean  kmedoids    4540  4515  0.840         0         5     7
+ 4 rds_sets/7ad81f8e836d4431.rds     3000       5         5 scran  euclidean  kmedoids    4540  4515  0.840         0         5     7
+ 5 rds_sets/8ed8c2786be959ae.rds    10000       5         5 scran  pearson    hclust      4539  4477  0.735         1         1     2
+ 6 rds_sets/dfc6fbdba2e0649d.rds     3000       5         5 RaceID spearman   kmedoids    4540  4515  0.675         0         0     4
+ 7 rds_sets/eaeb72249064ab19.rds     3000       5         5 scran  spearman   kmedoids    4540  4515  0.675         0         0     4
+ 8 rds_sets/4bb3548f9c565433.rds     3000       5         5 scran  pearson    hclust      4540  4515  0.658         2         1     4
+ 9 rds_sets/0b44bc352ffe85ec.rds    10000       5         5 RaceID logpearson kmedoids    4539  4477  0.654         1         0     4
+10 rds_sets/f8dd50af46da4bbf.rds    10000       5         5 scran  logpearson kmedoids    4539  4477  0.654         1         0     4
+# … with 62 more rows
+#+end_example
+
+
+* Many histories were RED
+
+This is because they were looking for:
+  + ENSG00000111057 :: KRT18
+  + ENSG00000170421 :: KRT8
+  + ENSG00000122641 :: INHBA
+  + ENSG00000169710 :: FASN
+
+These genes were chosen because...? They are LUMINAL types!
+
+
+* TODO Replicate the EMT (check genes they use) cluster type
+
+* TODO Replicate the luminal cluster type
+
+* TODO A joined analysis where the cluster seperate?
+
+* TODO An integrated analysis where they mix, but definite biases for EMT and luminal across batches.
+
+* TODO ScanPy analysis
